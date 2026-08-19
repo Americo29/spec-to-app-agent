@@ -16,6 +16,8 @@ npm install                 # agent + boilerplate deps
 npm install --prefix agent
 
 cp .env.example .env        # then fill in LLM_API_KEY
+
+rm -rf generated-app        # the committed output; remove for a clean run
 npm run agent -- --spec specs/car-inventory.txt
 
 cd generated-app && npm install && npm run dev
