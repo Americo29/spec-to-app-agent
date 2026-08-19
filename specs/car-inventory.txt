@@ -1,0 +1,29 @@
+Car Inventory Manager
+
+We need a small internal tool for browsing our car inventory. The app already has its
+foundation in place (React, TypeScript, Apollo Client, Material UI, and a mocked GraphQL
+API served by MSW), so this is about building the feature on top of that existing setup.
+
+The main screen should show the full list of cars in the inventory. The data comes from
+the GraphQL API through the GetCars query, which returns each car's make, model, year,
+color, and image URLs. While the data is loading the user should see a loading indicator,
+and if the request fails they should see a friendly error message instead of a blank screen.
+
+Each car should be presented as a Material UI card showing its make, model, year, color,
+and an image of the car.
+
+Users need to be able to find cars quickly. Add a search bar that filters the list by
+model as the user types. They should also be able to sort the list, either by year or by
+make, and switch between those two sorting options easily.
+
+Please keep the GraphQL data-fetching logic out of the components: put it in a custom
+useCars() hook that the screen consumes, so the query logic stays reusable and easy
+to test.
+
+The feature needs a reasonable level of automated testing. At a minimum, cover that the
+car list renders the data coming from the mocked API, that typing in the search bar
+actually filters the visible cars, and that switching the sort option changes the order
+of the list. Tests should verify real behavior, not just that components mount.
+
+Keep the implementation within the libraries the project already uses — no new
+dependencies.
