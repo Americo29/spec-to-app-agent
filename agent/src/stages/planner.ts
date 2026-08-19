@@ -101,6 +101,23 @@ export function validatePlan(value: unknown): { tasks: Task[]; errors: string[] 
     }
   });
 
+  // One task per output file. Two tasks on one path is a plan defect: the generator would run
+  // both and the second would silently overwrite the first, leaving state.generated holding only
+  // the last. Resolving that in the generator would hide a planning mistake instead of fixing it.
+  const firstIndexByFile = new Map<string, number>();
+  tasks.forEach((task, index) => {
+    if (!task.file) return;
+    const first = firstIndexByFile.get(task.file);
+    if (first === undefined) {
+      firstIndexByFile.set(task.file, index);
+    } else {
+      errors.push(
+        `duplicate task file "${task.file}": tasks "${tasks[first]?.id}" (index ${first}) and ` +
+          `"${task.id}" (index ${index}) both target it; each file must have exactly one task.`,
+      );
+    }
+  });
+
   // Dependencies must exist and must be declared earlier in the array.
   tasks.forEach((task, index) => {
     for (const dep of task.dependsOn) {
