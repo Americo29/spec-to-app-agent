@@ -55,32 +55,52 @@ export function parseTypecheck(output: string): ValidationError[] {
  */
 export function parseTests(output: string): ValidationError[] {
   const clean = stripAnsi(output);
-  const errors: ValidationError[] = [];
+  const lines = clean.split('\n');
 
-  let currentFile: string | null = null;
-  let buffer: string[] = [];
+  // Every FAIL header, in both forms Vitest emits:
+  //   FAIL  src/x.test.tsx > suite > case      a failing assertion
+  //   FAIL  src/x.test.tsx [ src/x.test.tsx ]  the suite could not be collected at all
+  const headers = lines
+    .map((line, index) => {
+      const match = /^\s*FAIL\s+(\S+)/.exec(line);
+      return match ? { index, file: match[1] as string, suiteLevel: /\[.*\]\s*$/.test(line) } : null;
+    })
+    .filter((header): header is { index: number; file: string; suiteLevel: boolean } => header !== null);
 
-  const flush = (): void => {
-    if (currentFile !== null && buffer.length > 0) {
-      errors.push({ file: currentFile, raw: buffer.join('\n').trim(), source: 'test' });
-    }
-    buffer = [];
-  };
+  if (headers.length > 0) {
+    // A collection error prints its cause once, after the last header, and it applies to every
+    // suite that failed to load — so it travels with each of them rather than only the last.
+    const lastHeader = headers[headers.length - 1] as { index: number };
+    const tail = lines
+      .slice(lastHeader.index + 1)
+      .filter((line) => /^\s*(Error|Caused by):/.test(line))
+      .join('\n')
+      .trim();
 
-  for (const line of clean.split('\n')) {
-    const header = /^\s*FAIL\s+(\S+?)(?:\s+>|\s*$)/.exec(line);
-    if (header) {
-      flush();
-      currentFile = header[1] ?? UNATTRIBUTED;
-    }
-    if (currentFile !== null) buffer.push(line);
+    return headers.map((header, position) => {
+      const next = headers[position + 1];
+      const own = lines.slice(header.index, next ? next.index : lines.length).join('\n').trim();
+      const raw = header.suiteLevel && tail && !own.includes(tail) ? `${own}\n${tail}` : own;
+      return { file: header.file, raw, source: 'test' as const };
+    });
   }
-  flush();
 
-  if (errors.length === 0) {
-    errors.push({ file: UNATTRIBUTED, raw: clean.trim(), source: 'test' });
-  }
-  return errors;
+  // No recognised marker. The run still failed — the caller only calls this on a non-zero exit —
+  // so report it, but strip npm's script echo and Vitest's banner first. Reporting those as the
+  // failure is what turned a real collection error into an unattributed phantom.
+  const meaningful = lines.filter(
+    (line) => line.trim() !== '' && !/^\s*>\s/.test(line) && !/^\s*RUN\s+v\d/.test(line),
+  );
+  return [
+    {
+      file: UNATTRIBUTED,
+      raw:
+        meaningful.length > 0
+          ? meaningful.join('\n').trim()
+          : 'The test command exited non-zero but produced no recognisable failure output.',
+      source: 'test',
+    },
+  ];
 }
 
 /** file -> its errors. The catch-all key is always reported, never repaired. */
@@ -281,6 +301,19 @@ export async function validator(state: PipelineState, llm: LlmClient): Promise<P
     );
     for (const error of unattributed) {
       console.log(`[stage:validator] unattributed [${error.source}] ${error.raw.split('\n')[0]}`);
+    }
+
+    // Nothing to repair is a distinct outcome, not a spent attempt. Burning the remaining passes
+    // re-running an identical check with no repair call in between wastes time and, worse, reports
+    // "3 attempts" as if the loop had tried something three times.
+    if (repairable.length === 0) {
+      throw abort(
+        `Validation failed on attempt ${attempt} with no repairable file.\n` +
+          `${summarise(errors)}\n\n` +
+          `Every failure is unattributed, so there is nothing to send to the repair prompt. ` +
+          `This usually means the failure is in configuration or collection rather than in a ` +
+          `generated file. The app is in ${current.outDir}.`,
+      );
     }
 
     if (attempt === MAX_ATTEMPTS) break;
