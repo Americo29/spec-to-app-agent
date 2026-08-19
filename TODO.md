@@ -94,10 +94,10 @@ deliverable and its `node_modules` must stay out of git.
   - Acceptance: a dry run writes every planned file to `generated-app/` in dependency order and records each in `state.generated`; no task receives context for a file it does not depend on.
   - Commits: `fix: anchor dry-run fixture resolution on an unambiguous prompt marker`, `feat: generator prompts transcribed from the design`, `feat: dependency-aware file generator`, `feat: one task per output file in plan validation`, `docs: reconcile design with generator decisions`
 
-- [ ] **Stage 4 — Validator + repair loop**
+- [x] **Stage 4 — Validator + repair loop**
   - Scope: `stages/validator.ts` — install deps once, run typecheck then tests in the output directory, parse and attribute errors, repair per file, bounded at 3 attempts.
   - Acceptance: the dry-run fixture set fails validation on attempt 1 and passes after the repair call; unattributable errors land in a reported catch-all bucket; still-red after 3 attempts exits 1 with a clean summary and no raw stack trace.
-  - Commit: `feat: validate/repair loop with bounded retries`
+  - Commits: `feat: repair prompts transcribed from the design`, `feat: validate/repair loop with bounded retries`, `feat: pipeline orchestration and CLI`, `chore: single-command agent script in root package.json`, `docs: reconcile design with validation decisions`
 
 - [ ] **Stage 5 — End-to-end run**
   - Scope: run the agent against `specs/car-inventory.txt` with a real provider, tune prompts by hand, commit the resulting `generated-app/`.

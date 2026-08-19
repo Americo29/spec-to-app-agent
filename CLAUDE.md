@@ -252,13 +252,35 @@ LLM_MODEL=gemini-2.5-flash
   mid-run failure leaves a partially generated app. This is accepted: the design promises neither
   idempotent nor atomic runs, and a real run starts from a clean `outDir`. The validator must
   therefore work from what is on disk rather than assume every planned file exists.
-- Run `npm run typecheck`, then `npm run test -- --run` inside `outDir` (install deps once first).
+- Run `npm run typecheck`, then `npm run test -- --run` inside `outDir` (install deps once first;
+  the install is skipped when `node_modules` already exists).
+- **Both checks run on every pass, even when typecheck fails.** Vite transpiles without
+  type-checking, so tests surface a different class of defect; with only three attempts available,
+  each pass should return as much signal as it can.
 - Parse errors best-effort: tsc lines → file via regex; vitest failures → test file name.
   Group by file. Unattributable errors go to a catch-all bucket reported to the human.
 - For each broken file: repair prompt with { current content, raw errors, direct-dependency
   contents }. Overwrite, re-validate. **Max 3 attempts total.**
 - If still red after 3: exit code 1 with a clean summary of remaining failures (this is a
   designed outcome, not a crash).
+- **A test failure is repaired in the file under test, not in the test.** The target is resolved
+  from the plan: a `test` task's `dependsOn` names what it exercises. The failing test's content
+  travels as context, and the raw failure with it. Attributing a behavioural failure to the test
+  file is precisely what produces tests that pass while asserting nothing — the failure mode this
+  whole validation design exists to prevent, and one that would be invisible in a green run. If the
+  file under test cannot be resolved from the plan, repair falls back to the test file and **says
+  so in the log**, because that fallback means repair is aiming at a test.
+- **Three validation attempts means two repair opportunities.** The third attempt validates and, if
+  still red, aborts — it does not repair again. The bound is on validation passes, not on repairs.
+- **Known limitation:** repair is one call per file carrying only that file's errors. A defect that
+  spans two files — an exported signature and its consumer — gives each call half the picture.
+  Widening the context to co-dependents brings its own cost and oscillation risk, so this stays as
+  is; watch for it during the end-to-end stage.
+- Unattributed errors are **reported but never repaired** — there is no file to send to the repair
+  prompt. They appear in the per-attempt log and in the final summary under `(unattributed)`.
+- `ValidationError.raw` keeps the whole failure block, not a one-line extract. For a test failure
+  the rendered DOM dump is often the only evidence of what actually rendered, and the repair prompt
+  is fed `raw` untouched.
 
 ## Prompts — transcribe verbatim into `agent/src/prompts/`
 
@@ -368,7 +390,8 @@ export const REPAIR_SYSTEM = `You are a senior React + TypeScript engineer fixin
 Output rules (strict):
 - Output ONLY the complete corrected content of the file. No fences, no explanations.
 - Make the MINIMAL change that fixes the reported errors. Do not refactor, rename exports, or alter the file's public API — other files depend on it.
-- If the error indicates the real bug is in a DIFFERENT file, still output this file unchanged or minimally adjusted, and it will be handled separately.`;
+- If the error indicates the real bug is in a DIFFERENT file, still output this file unchanged or minimally adjusted, and it will be handled separately.
+- When a TEST failure is reported, the test encodes the intended behavior and is authoritative. Fix the implementation to satisfy it. Never weaken, rewrite, or delete an assertion to make it pass.`;
 
 export const repairUser = (file: string, currentContent: string, errors: string, depFiles: Record<string, string>) => `
 <file_path>${file}</file_path>
@@ -393,6 +416,12 @@ Output the corrected content of ${file}.`;
 ```
 npm run agent -- --spec specs/car-inventory.txt [--out generated-app] [--dry-run]
 ```
+
+The `agent` script lives in the **root** `package.json` (`agent/node_modules/.bin/tsx
+agent/src/index.ts`) — the single authorized modification to the boilerplate, required by the
+brief's "run your agent with a single script". Running from the root keeps `--spec` paths relative
+to the repository rather than to `agent/`. Argument parsing is plain `process.argv`: four flags do
+not justify a dependency.
 
 Startup order: parse args → load .env → validate env (skip if dry-run) → run pipeline →
 print summary table: stages executed, LLM calls, tokens in/out, validation attempts,
