@@ -99,15 +99,35 @@ deliverable and its `node_modules` must stay out of git.
   - Acceptance: the dry-run fixture set fails validation on attempt 1 and passes after the repair call; unattributable errors land in a reported catch-all bucket; still-red after 3 attempts exits 1 with a clean summary and no raw stack trace.
   - Commits: `feat: repair prompts transcribed from the design`, `feat: validate/repair loop with bounded retries`, `feat: pipeline orchestration and CLI`, `chore: single-command agent script in root package.json`, `docs: reconcile design with validation decisions`
 
-- [ ] **Stage 5 — End-to-end run**
+- [x] **Stage 5 — End-to-end run**
   - Scope: run the agent against `specs/car-inventory.txt` with a real provider, tune prompts by hand, commit the resulting `generated-app/`.
   - Acceptance: `cd generated-app && npm install && npm run dev` serves the app, and its own typecheck and tests pass; the generated app satisfies every REQUIRED item in the spec (car list from the GetCars query, search by model, sort by year/make, MUI cards, `useCars()` hook, behavioral tests).
-  - Commit: `feat: sample spec + generated output from full run`
+  - Commits: `fix: resolve vitest setup file against the config's own directory`, `fix: surface collection errors and stop when nothing is repairable`, `chore: exclude generated-app from the root test run`, `docs: reconcile design with Stage 5 fixes and amend the git rule`, `fix: correct the provider defaults in .env.example`, `feat: sample generated app from a full agent run`, `docs: record Stage 5 findings and the real-run cost data`
+  - Result: passed. `generated-app/` typechecks, builds, serves, and its suite passes 6 of 6 (4 generated + the boilerplate's 2).
 
 - [ ] **Stage 6 — README**
   - Scope: root `README.md` — setup, architecture overview and diagram, LLM provider choice, design tradeoffs, measured cost per run, future work.
   - Acceptance: covers the challenge's write-up requirements — which LLM and why, agent architecture, approximate tokens and API cost per run, how to run the agent from a clean clone.
   - Commit: `docs: architecture, tradeoffs, cost analysis`
+  - Measured inputs from the Stage 5 run, to be written up rather than re-derived:
+
+    | Metric | Value |
+    |---|---|
+    | LLM calls | 10 — 1 planner, 5 generator, 4 repair |
+    | Tokens in / out | 21,930 / 6,199 |
+    | Planner call | 4,298 in / 417 out — 20% of all input tokens |
+    | Repair calls | 586–1,862 input tokens each |
+    | Validation attempts | 2 of 3; plan validated on attempt 1 |
+    | Files repaired | 4 of 5 generated files failed first validation |
+
+    Model choice, measured on the same agent, prompts and spec with only `LLM_MODEL` changed:
+    `models/gemini-3.6-flash` passed, green on attempt 2. `models/gemini-flash-lite-latest` planned
+    correctly but failed to converge — 3 attempts, the same three test failures each time, with
+    repair calls consuming ~12,955 input tokens each against 586–1,862 on Flash. That is 7–22x the
+    input per repair call for no progress, and it is why Flash is the default.
+
+    Dollar cost is not recorded: the token counts are measured, a price is not, and it changes.
+    Convert at the provider's published rate when writing the README.
 
 ## Out of scope
 
