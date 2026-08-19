@@ -50,6 +50,10 @@ network, no cost. Useful for seeing the shape of a run before spending anything.
 npm run agent -- --spec specs/car-inventory.txt --dry-run
 ```
 
+`generated-app/` is written in place, not replaced: a second run copies the boilerplate over
+whatever is already there and leaves earlier generated files behind, so `rm -rf generated-app`
+first — or pass `--out` elsewhere — for a clean run.
+
 Other flags: `--out <dir>` (default `generated-app`), `--help`.
 
 ## Architecture
