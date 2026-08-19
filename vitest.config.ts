@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 
@@ -10,6 +10,11 @@ export default defineConfig({
     },
   },
   test: {
+    // generated-app/ is a build artifact of the agent, not part of this project's suite. Without
+    // this, a plain `npm test` at the repo root globs into it and fails: those tests are written
+    // against their own project root, not this one. Spread the defaults rather than replacing
+    // them — an `exclude` array overrides node_modules and dist otherwise.
+    exclude: [...configDefaults.exclude, "generated-app/**"],
     environment: "jsdom",
     globals: true,
     // Absolute, resolved against this config's own directory. A relative path here resolves
