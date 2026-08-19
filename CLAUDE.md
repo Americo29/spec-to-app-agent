@@ -24,8 +24,8 @@ flowchart LR
 
 ## Hard rules for Claude Code
 
-1. **Only run `git commit` when the human explicitly asks for it at the end of a stage**, using exactly the commit message from the build-order table. Never `git push`. Before committing, show a summary of changed files.
-2. **Never modify the boilerplate at the repo root** (`src/`, `public/`, `index.html`, configs). The agent copies it at runtime; the source stays pristine.
+1. **Only run `git commit` or `git push` when the human explicitly asks for it in the same instruction**, using exactly the commit message from the build-order table. "Then push" is that authorization; never push unprompted, and never treat a previous stage's authorization as carrying forward. Before committing, show a summary of changed files.
+2. **Never modify the boilerplate at the repo root** (`src/`, `public/`, `index.html`, configs). The agent copies it at runtime; the source stays pristine. Exactly **three** modifications are authorized, all recorded below: the `agent` script in `package.json`, and in `vitest.config.ts` both the absolute `setupFiles` path and the `generated-app/**` exclusion. The brief explicitly permits updating boilerplate configs to improve agent output quality; anything beyond these three needs the human's approval.
 3. **Work one stage at a time.** Only implement the stage the human asks for in the current instruction. Do not "get ahead".
 4. **No new runtime dependencies** beyond: `openai` (SDK, used as a generic OpenAI-compatible client), `commander` (or plain `process.argv` — prefer plain argv if commander feels heavy), `dotenv`. Dev deps: `typescript`, `tsx`, `@types/node`.
 5. **No classes unless state demands it.** Prefer plain functions + typed data. Each stage is a function `(state: PipelineState, llm: LlmClient) => Promise<PipelineState>` — the client is passed alongside the state rather than stored on it, so `PipelineState` stays plain serialisable data. Snapshot ignores its `llm` argument; the signature is uniform so `pipeline.ts` can call every stage the same way.
@@ -247,6 +247,29 @@ LLM_MODEL=gemini-2.5-flash
   here would burn calls without the error text that makes a fix possible.
 - Write each file immediately; record in `state.generated`.
 
+### Authorized boilerplate modifications
+
+Three, and only three:
+
+1. `package.json` — the `agent` script (see CLI, below).
+2. `vitest.config.ts` — `setupFiles` is an **absolute** path built with
+   `resolve(__dirname, "src/test-setup.ts")`. A relative path there resolves against whichever
+   project Vite picks as the root, so the suite breaks the moment the app is copied into a
+   subdirectory of another Vite project — which is exactly what the agent does when it generates
+   into `generated-app/`. Setting `root` or `test.root` does **not** fix it; only the absolute
+   setup path does. Verified by reproduction, nested and standalone.
+   This is preferable to a README instruction nobody reads before running `npm test`, and to
+   relocating the deliverable, which would contradict the structure the brief asks for. It also
+   keeps snapshot's copy-only property intact: rewriting the config during snapshot would have
+   made the agent a mutator of the tree it copies.
+3. `vitest.config.ts` — `exclude: [...configDefaults.exclude, "generated-app/**"]`. A reviewer's
+   first instinct at the repo root is `npm install && npm test`; without this it collects the
+   generated app's tests, which are written against their own project root, and shows red. Those
+   tests belong to a build artifact, not to the boilerplate's own suite. The defaults are spread
+   rather than replaced, since an `exclude` array otherwise overrides `node_modules` and `dist`.
+   Like the item above, this exists only because the brief's structure puts the generated app
+   inside the repository that produced it.
+
 ### 4. Validator + Repair (`stages/validator.ts`) — bounded loop
 - **`outDir` is not guaranteed complete.** The generator writes each file as it is produced, so a
   mid-run failure leaves a partially generated app. This is accepted: the design promises neither
@@ -259,6 +282,18 @@ LLM_MODEL=gemini-2.5-flash
   each pass should return as much signal as it can.
 - Parse errors best-effort: tsc lines → file via regex; vitest failures → test file name.
   Group by file. Unattributable errors go to a catch-all bucket reported to the human.
+- **Failure is derived from exit codes and genuine runner markers, never from unrecognised
+  output.** npm's script echo (`> pkg@1.0.0 test`) and Vitest's banner are stripped before
+  anything is reported: treating them as the failure once turned a real collection error into a
+  meaningless "unattributed" line and hid the actual bug for a whole run.
+- **A suite-level collection error is a real failure** and must surface with its actual message.
+  Vitest prints it as `FAIL <path> [ <path> ]` followed by the cause; the cause applies to every
+  suite that failed to load, so it travels with each of them. Matching only the
+  `FAIL <path> > suite > case` form silently loses the entire class.
+- **Zero attributable files is a distinct outcome that stops immediately.** If every failure is
+  unattributed there is nothing to send to the repair prompt, so the loop aborts on that attempt
+  rather than re-running an identical check with no repair call in between — which would otherwise
+  report "3 attempts" as though something had been tried three times.
 - For each broken file: repair prompt with { current content, raw errors, direct-dependency
   contents }. Overwrite, re-validate. **Max 3 attempts total.**
 - If still red after 3: exit code 1 with a clean summary of remaining failures (this is a
@@ -418,7 +453,7 @@ npm run agent -- --spec specs/car-inventory.txt [--out generated-app] [--dry-run
 ```
 
 The `agent` script lives in the **root** `package.json` (`agent/node_modules/.bin/tsx
-agent/src/index.ts`) — the single authorized modification to the boilerplate, required by the
+agent/src/index.ts`) — one of the two authorized modifications to the boilerplate, required by the
 brief's "run your agent with a single script". Running from the root keeps `--spec` paths relative
 to the repository rather than to `agent/`. Argument parsing is plain `process.argv`: four flags do
 not justify a dependency.
