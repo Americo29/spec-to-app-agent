@@ -105,10 +105,11 @@ deliverable and its `node_modules` must stay out of git.
   - Commits: `fix: resolve vitest setup file against the config's own directory`, `fix: surface collection errors and stop when nothing is repairable`, `chore: exclude generated-app from the root test run`, `docs: reconcile design with Stage 5 fixes and amend the git rule`, `fix: correct the provider defaults in .env.example`, `feat: sample generated app from a full agent run`, `docs: record Stage 5 findings and the real-run cost data`
   - Result: passed. `generated-app/` typechecks, builds, serves, and its suite passes 6 of 6 (4 generated + the boilerplate's 2).
 
-- [ ] **Stage 6 — README**
+- [x] **Stage 6 — README**
   - Scope: root `README.md` — setup, architecture overview and diagram, LLM provider choice, design tradeoffs, measured cost per run, future work.
   - Acceptance: covers the challenge's write-up requirements — which LLM and why, agent architecture, approximate tokens and API cost per run, how to run the agent from a clean clone.
-  - Commit: `docs: architecture, tradeoffs, cost analysis`
+  - Commits: `docs: architecture, tradeoffs, cost analysis`, `docs: note that a clean run needs generated-app removed first`, `docs: make the clean-run step part of the quick start block`
+  - Result: passed. Written up from the measured Stage 5 figures below. Verified from a clean clone: repository complete, both installs work, `.env.example` correct, and the agent ran through to the validator. That verification also showed a reviewer hits the non-idempotent-run property (OBS-16 / D-26) on their first attempt when `generated-app/` already exists, so Quick start now names `rm -rf generated-app` and `--out` — the two follow-up commits above.
   - Measured inputs from the Stage 5 run, to be written up rather than re-derived:
 
     | Metric | Value |
