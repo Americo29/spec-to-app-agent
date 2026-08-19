@@ -30,7 +30,7 @@ flowchart LR
 4. **No new runtime dependencies** beyond: `openai` (SDK, used as a generic OpenAI-compatible client), `commander` (or plain `process.argv` — prefer plain argv if commander feels heavy), `dotenv`. Dev deps: `typescript`, `tsx`, `@types/node`.
 5. **No classes unless state demands it.** Prefer plain functions + typed data. Each stage is a function `(state: PipelineState, llm: LlmClient) => Promise<PipelineState>` — the client is passed alongside the state rather than stored on it, so `PipelineState` stays plain serialisable data. Snapshot ignores its `llm` argument; the signature is uniform so `pipeline.ts` can call every stage the same way.
 6. **Every tool invocation logs one line**: `[tool:writeFile] src/hooks/useCars.ts`, `[tool:runCommand] npm run typecheck`, `[llm:planner] 1,203 in / 890 out tokens`.
-7. **Fail gracefully**: invalid LLM JSON → 1 retry with the error included → abort with a clear message and exit code 1. Never print a raw stack trace as the primary output.
+7. **Fail gracefully**: invalid LLM JSON → 1 retry with the error included → abort with a clear message and exit code 1. Never print a raw stack trace as the primary output. Designed aborts go through the shared `abort(message)` in `tools/errors.ts`, which tags the error with an `exitCode`; the CLI prints tagged errors as-is and reserves the stack trace for genuinely unexpected throws.
 8. Keep prompts in `agent/src/prompts/` exactly as provided below. Prompt tweaks during E2E are made by the human.
 9. **The design must never diverge from reality.** Whenever an approved decision, deviation, or refinement changes what this document specifies, CLAUDE.md must be updated in the SAME stage the change is applied. CLAUDE.md is the authoritative design and must always describe the code as it actually exists — never a superseded plan. If a change is applied without updating CLAUDE.md, that is a defect. CONTRACT.md records why the change happened; CLAUDE.md records what the design now is.
 
@@ -58,7 +58,8 @@ repo/                       # the repository root IS the boilerplate — NEVER m
 │   │   ├── tools/
 │   │   │   ├── fs.ts       # readTree, readFiles, writeFile, copyDir
 │   │   │   ├── shell.ts    # runCommand (spawn, captured stdout/stderr, timeout)
-│   │   │   └── llm.ts      # callText, callTool, dry-run fixtures, usage tracking
+│   │   │   ├── llm.ts      # callText, callTool, dry-run fixtures, usage tracking
+│   │   │   └── errors.ts   # abort(): tagged error → clean message + exit code
 │   │   ├── prompts/
 │   │   │   ├── planner.ts
 │   │   │   ├── generator.ts
@@ -181,14 +182,30 @@ LLM_MODEL=gemini-2.5-flash
   `node_modules` must stay out of git; the copied `.gitignore` keeps that protection local to the
   generated app instead of relying only on the root `.gitignore`. Do not drop it when revisiting
   this list.
-- Build `tree` (relative paths, one per line).
+- Build `tree` (relative paths, one per line) from the copy, so `tree` and `files` always
+  describe the same directory.
 - Read into `files`: package.json, tsconfig, vite/vitest configs, MSW handlers + mock data,
   Apollo client setup, App/entry files. Cap: skip any file > 20KB.
+- **`KEY_FILES` is a fixed list, deliberately not a heuristic**: the planner must reason over
+  identical context on every run, which is what makes a run reproducible and a prompt regression
+  attributable. The accepted cost is that a new boilerplate file is not read until the list is
+  updated. The mitigation is already in place — `tree` carries **every** file in the copy, so the
+  planner always knows what exists and can place new files correctly; it simply does not see the
+  contents of anything outside the list. Excluding a file from the snapshot therefore also hides
+  it from the planner, since `files` is read from the copy rather than the source.
 
 ### 2. Planner (`stages/planner.ts`) — 1 LLM call, schema-enforced
 - Uses `PLANNER_SYSTEM` + `plannerUser(...)` + the `submit_plan` tool schema (see prompts).
 - Post-validation in code: unique ids, all `dependsOn` reference existing earlier tasks,
   topological sort succeeds (no cycles), all file paths are relative and inside the app root.
+- Validation reports **every** problem it finds, not the first: the retry prompt is more useful
+  when it lists them together.
+- The "earlier tasks only" rule and the cycle check are **deliberately redundant**. Ordering makes
+  a cycle unreachable in practice — every cycle contains a forward reference and is reported as
+  that — so cycle detection is defensive. `topologicalSort` stays regardless, because it is what
+  produces the plan's execution order for the generator.
+- The cycle check is skipped while task ids are not unique: the graph is keyed by id, so duplicates
+  collapse into a false cycle, and a misleading error in the retry prompt misdirects the model.
 - On validation failure: 1 retry appending the validation error to the user prompt; then abort.
 
 ### 3. Generator (`stages/generator.ts`) — 1 LLM call per task

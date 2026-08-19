@@ -84,10 +84,10 @@ deliverable and its `node_modules` must stay out of git.
   - Acceptance: `agent/` type-checks; every tool call emits exactly one log line in the specified format; `callText`/`callTool` return fixtures under `--dry-run` with zero network access.
   - Commits: `feat: agent project scaffold and pipeline types`, `feat: filesystem and shell tool layer`, `feat: OpenAI-compatible LLM client with dry-run fixtures`, `docs: reconcile design with tool-layer decisions`
 
-- [ ] **Stage 2 — Snapshot + planner**
+- [x] **Stage 2 — Snapshot + planner**
   - Scope: `stages/snapshot.ts` (copy boilerplate, build tree, read key files) and `stages/planner.ts` (one schema-enforced LLM call plus in-code plan validation).
   - Acceptance: the snapshot copies exactly the entries the generated app needs — `package.json`, `package-lock.json`, `src/`, `public/`, `index.html`, `vite.config.ts`, `vitest.config.ts`, `tsconfig.json`, `vite-env.d.ts`, and `.gitignore` (so the committed `generated-app/` keeps its own `node_modules` out of git) — and no agent-side, repo-side, OS or editor artifact; a dry run then produces a plan whose ids are unique, whose `dependsOn` entries all reference earlier tasks, that topologically sorts without cycles, and whose file paths are relative and inside the app root; an invalid plan triggers exactly one retry, then aborts with exit code 1 and a readable message.
-  - Commit: `feat: snapshot + LLM planner with schema enforcement`
+  - Commits: `feat: planner prompts transcribed from the design`, `feat: shared abort helper for designed failures`, `feat: snapshot stage`, `feat: planner stage with in-code plan validation`, `docs: reconcile design with planner decisions`
 
 - [ ] **Stage 3 — Generator**
   - Scope: `stages/generator.ts` — iterate the plan in topological order, one LLM call per task, context assembled from direct dependencies plus type-selected boilerplate files.
