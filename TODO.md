@@ -74,15 +74,15 @@ deliverable and its `node_modules` must stay out of git.
 
 ## Tickets
 
-- [ ] **Stage 0 — Scaffold + planning artifacts**
+- [x] **Stage 0 — Scaffold + planning artifacts**
   - Scope: verify the boilerplate runs, audit repo structure, housekeeping (.gitignore, README rename, root `.env.example` rewritten to the agent's `LLM_*` vars), write CLAUDE.md and TODO.md.
   - Acceptance: `npm install`, `npm run typecheck`, `npm run test`, `npm run build` and `npm run dev` all succeed on the untouched boilerplate; TODO.md lists every stage with acceptance criteria.
   - Commit: `chore: agent design, task breakdown and sample spec`
 
-- [ ] **Stage 1 — Types + tool layer**
+- [x] **Stage 1 — Types + tool layer**
   - Scope: `agent/src/types.ts` plus `tools/fs.ts`, `tools/shell.ts`, `tools/llm.ts` (including dry-run fixture loading and token accounting).
   - Acceptance: `agent/` type-checks; every tool call emits exactly one log line in the specified format; `callText`/`callTool` return fixtures under `--dry-run` with zero network access.
-  - Commit: `feat: pipeline types + tool layer`
+  - Commits: `feat: agent project scaffold and pipeline types`, `feat: filesystem and shell tool layer`, `feat: OpenAI-compatible LLM client with dry-run fixtures`, `docs: reconcile design with tool-layer decisions`
 
 - [ ] **Stage 2 — Snapshot + planner**
   - Scope: `stages/snapshot.ts` (copy boilerplate, build tree, read key files) and `stages/planner.ts` (one schema-enforced LLM call plus in-code plan validation).

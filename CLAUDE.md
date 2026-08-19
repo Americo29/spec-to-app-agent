@@ -28,7 +28,7 @@ flowchart LR
 2. **Never modify the boilerplate at the repo root** (`src/`, `public/`, `index.html`, configs). The agent copies it at runtime; the source stays pristine.
 3. **Work one stage at a time.** Only implement the stage the human asks for in the current instruction. Do not "get ahead".
 4. **No new runtime dependencies** beyond: `openai` (SDK, used as a generic OpenAI-compatible client), `commander` (or plain `process.argv` — prefer plain argv if commander feels heavy), `dotenv`. Dev deps: `typescript`, `tsx`, `@types/node`.
-5. **No classes unless state demands it.** Prefer plain functions + typed data. Each stage is a function `(state: PipelineState) => Promise<PipelineState>`.
+5. **No classes unless state demands it.** Prefer plain functions + typed data. Each stage is a function `(state: PipelineState, llm: LlmClient) => Promise<PipelineState>` — the client is passed alongside the state rather than stored on it, so `PipelineState` stays plain serialisable data. Snapshot ignores its `llm` argument; the signature is uniform so `pipeline.ts` can call every stage the same way.
 6. **Every tool invocation logs one line**: `[tool:writeFile] src/hooks/useCars.ts`, `[tool:runCommand] npm run typecheck`, `[llm:planner] 1,203 in / 890 out tokens`.
 7. **Fail gracefully**: invalid LLM JSON → 1 retry with the error included → abort with a clear message and exit code 1. Never print a raw stack trace as the primary output.
 8. Keep prompts in `agent/src/prompts/` exactly as provided below. Prompt tweaks during E2E are made by the human.
@@ -80,6 +80,11 @@ repo/                       # the repository root IS the boilerplate — NEVER m
 The agent lives in `agent/` alongside the boilerplate it consumes, per the challenge's
 "Getting Started". At runtime the snapshot stage copies the root into `generated-app/`;
 the root itself stays pristine.
+
+`agent/tsconfig.json` is `strict` with `moduleResolution: "Bundler"`. Bundler rather than
+NodeNext is deliberate: the prompt files transcribed below use extensionless relative imports
+(`import type { Task } from '../types';`), which NodeNext rejects. `tsx` resolves them the same
+way at runtime, so the prompts stay transcribable verbatim.
 
 ## Core types (`agent/src/types.ts`)
 
@@ -135,15 +140,32 @@ LLM_MODEL=gemini-2.5-flash
   there is no `agent/.env.example`. It documents the three vars with commented example values
   for Gemini (default), OpenRouter, and OpenAI. `dotenv` loads `.env` from the repo root.
 
+- **Factory**: `createLlmClient({ dryRun, usage }): LlmClient`. A free function cannot reach
+  `state`, so the client closes over the `Usage` object it is given — in practice `state.usage` —
+  and accumulates into it in place. No class (hard rule 5). `pipeline.ts` creates the client once
+  and passes it to each stage alongside `state`.
 - `callText(system, user): Promise<string>` — plain completion, strips markdown fences defensively.
 - `callTool(system, user, tool): Promise<unknown>` — forces the tool call (`tool_choice`), returns parsed arguments.
-- Both accumulate `state.usage` and log one line per call.
+- Both accumulate the client's `usage` and log one line per call.
+- **Tool schemas are provider-agnostic in the prompts.** `submitPlanTool` is declared with
+  Anthropic-style `input_schema`; `callTool` translates it to the target provider's format
+  (for the OpenAI-compatible client, `function.parameters` plus a forced `tool_choice`). The
+  prompt files therefore never encode a provider.
 - **Dry-run mode** (`--dry-run` flag): both functions return fixtures from `agent/src/fixtures/`
   instead of calling the API. The fixture set must be **coherent**: the mock plan references
   files, the mock generated files match that plan and import each other correctly, and one
   fixture intentionally contains a type error on the first validation pass with a corrected
   version served on the repair call — so the entire pipeline, including the repair loop, is
   exercisable end-to-end with zero API calls.
+- Fixtures use a **neutral toy domain**, never spec content, so they cannot be mistaken for
+  hardcoded knowledge of the target app.
+- Dry-run addresses fixtures by matching the target file path in the prompt text, and tells a
+  repair call from a generation call by the presence of `<validation_errors>`. **A lookup that
+  fails is a hard error naming which lookup failed and why — never a fallback fixture**, because a
+  silently wrong file would corrupt a dry run invisibly. The cost of this is a coupling to prompt
+  text: after any prompt tweak, re-run the dry run to confirm fixtures still resolve.
+- Dry-run counts calls but reports **0 tokens** (`[llm:planner] dry-run fixture, 0 tokens`). This is
+  deliberate — estimating tokens would put invented numbers in the cost summary.
 
 ## Stage contracts
 
@@ -338,6 +360,11 @@ final status, output path.
 | 4 | validator + repair loop + error parser | 5: feat: validate/repair loop with bounded retries |
 | 5 | E2E run, prompt tweaks (human-driven) | 6: feat: sample spec + generated output from full run |
 | 6 | README (human-driven) | 7: docs: architecture, tradeoffs, cost analysis |
+
+A stage may land as **several focused commits** when it has separable concerns; the table names the
+stage's headline scope, not a one-commit-per-stage rule. When hard rule 9 triggers, the design
+reconciliation is its own `docs:` commit at the end of the stage so the code commits stay readable.
+Stage 1 landed as four commits.
 
 ## Explicitly out of scope (do not build)
 
