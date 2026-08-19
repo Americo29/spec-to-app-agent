@@ -36,7 +36,11 @@ interface Env {
   model: string;
 }
 
-function readEnv(): Env {
+/**
+ * Exported so the CLI can validate the environment before any work starts, rather than letting
+ * a missing key surface partway through a run.
+ */
+export function readEnv(): Env {
   loadDotenv({ path: resolve(REPO_ROOT, '.env') });
   const baseURL = process.env['LLM_BASE_URL'];
   const apiKey = process.env['LLM_API_KEY'];
