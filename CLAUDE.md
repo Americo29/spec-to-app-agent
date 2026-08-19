@@ -160,11 +160,16 @@ LLM_MODEL=gemini-2.5-flash
   exercisable end-to-end with zero API calls.
 - Fixtures use a **neutral toy domain**, never spec content, so they cannot be mistaken for
   hardcoded knowledge of the target app.
-- Dry-run addresses fixtures by matching the target file path in the prompt text, and tells a
-  repair call from a generation call by the presence of `<validation_errors>`. **A lookup that
-  fails is a hard error naming which lookup failed and why — never a fallback fixture**, because a
-  silently wrong file would corrupt a dry run invisibly. The cost of this is a coupling to prompt
-  text: after any prompt tweak, re-run the dry run to confirm fixtures still resolve.
+- Dry-run identifies a call's target file from the one place each prompt names it unambiguously —
+  the repair prompt's `<file_path>` tag, the generator prompt's closing
+  `Generate the complete content of X.` — and tells a repair call from a generation call by the
+  presence of `<validation_errors>`. Scanning the prompt for any known fixture path does **not**
+  work: the generator prompt embeds the full plan, so every task's prompt mentions every file, and a
+  substring match silently returns the same fixture for every task.
+- **A failed lookup is a hard error naming which lookup failed and why — never a fallback
+  fixture**, because a silently wrong file would corrupt a dry run invisibly. The cost is a
+  coupling to prompt text: after any prompt tweak, re-run the dry run to confirm fixtures still
+  resolve.
 - Dry-run counts calls but reports **0 tokens** (`[llm:planner] dry-run fixture, 0 tokens`). This is
   deliberate — estimating tokens would put invented numbers in the cost summary.
 
@@ -198,6 +203,9 @@ LLM_MODEL=gemini-2.5-flash
 - Uses `PLANNER_SYSTEM` + `plannerUser(...)` + the `submit_plan` tool schema (see prompts).
 - Post-validation in code: unique ids, all `dependsOn` reference existing earlier tasks,
   topological sort succeeds (no cycles), all file paths are relative and inside the app root.
+- Also validated: **one task per output file**. Two tasks targeting one path is a plan defect —
+  the generator would run both and the second would silently overwrite the first. Resolving that
+  in the generator would hide a planning mistake rather than fix it.
 - Validation reports **every** problem it finds, not the first: the retry prompt is more useful
   when it lists them together.
 - The "earlier tasks only" rule and the cycle check are **deliberately redundant**. Ordering makes
@@ -214,12 +222,36 @@ LLM_MODEL=gemini-2.5-flash
   dependencies only** (from `state.generated`) + boilerplate files selected deterministically
   by `task.type`:
   - `mock` → existing MSW handlers + schema
-  - `hook` → Apollo client setup + MSW handlers
+  - `hook` → Apollo client setup + **existing query documents** + MSW handlers
   - `component`/`page` → nothing extra beyond deps (MUI is known)
-  - `test` → file under test + vitest config/setup + MSW handlers
+  - `test` → file under test + vitest config/setup + MSW handlers + **existing query documents**
+- **Every task type additionally receives the boilerplate's own convention examples**
+  (`src/components/Example.tsx`, `src/__tests__/Example.test.tsx`) as few-shot style references.
+  The planner sees these two by name only, so matching the project's conventions — import style,
+  component shape, how a test is written — rests entirely on the generator. Few-shot examples are
+  also what the brief asks for under Prompt Design.
+  These are read by the generator directly from the copy, **not** added to the planner's
+  `KEY_FILES`: that list is a deliberately fixed context set for the planner and is not expanded
+  to serve a later stage.
+- `src/graphql/queries.ts` is in the `hook` and `test` mappings for one reason: a generated
+  document that does not match what the MSW handlers answer produces a **runtime test failure
+  while typecheck stays green** — the failure shape the repair loop is worst at fixing, since
+  there is no compiler error to attribute. Tests need it as well as hooks, because the convention
+  example `src/__tests__/Example.test.tsx` builds `MockedProvider` mocks around `GET_CARS`, and a
+  test depends only on its component, never on the hook, so dependency context alone never carries
+  the document.
+- Context assembly is deterministic code — a switch on `task.type` — never an LLM decision.
+  Letting the model choose its own context would make every run's input, and therefore every
+  failure, irreproducible.
+- No retries in this stage. A file that fails to compile is the validator's problem; retrying
+  here would burn calls without the error text that makes a fix possible.
 - Write each file immediately; record in `state.generated`.
 
 ### 4. Validator + Repair (`stages/validator.ts`) — bounded loop
+- **`outDir` is not guaranteed complete.** The generator writes each file as it is produced, so a
+  mid-run failure leaves a partially generated app. This is accepted: the design promises neither
+  idempotent nor atomic runs, and a real run starts from a clean `outDir`. The validator must
+  therefore work from what is on disk rather than assume every planned file exists.
 - Run `npm run typecheck`, then `npm run test -- --run` inside `outDir` (install deps once first).
 - Parse errors best-effort: tsc lines → file via regex; vitest failures → test file name.
   Group by file. Unattributable errors go to a catch-all bucket reported to the human.

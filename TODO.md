@@ -89,10 +89,10 @@ deliverable and its `node_modules` must stay out of git.
   - Acceptance: the snapshot copies exactly the entries the generated app needs — `package.json`, `package-lock.json`, `src/`, `public/`, `index.html`, `vite.config.ts`, `vitest.config.ts`, `tsconfig.json`, `vite-env.d.ts`, and `.gitignore` (so the committed `generated-app/` keeps its own `node_modules` out of git) — and no agent-side, repo-side, OS or editor artifact; a dry run then produces a plan whose ids are unique, whose `dependsOn` entries all reference earlier tasks, that topologically sorts without cycles, and whose file paths are relative and inside the app root; an invalid plan triggers exactly one retry, then aborts with exit code 1 and a readable message.
   - Commits: `feat: planner prompts transcribed from the design`, `feat: shared abort helper for designed failures`, `feat: snapshot stage`, `feat: planner stage with in-code plan validation`, `docs: reconcile design with planner decisions`
 
-- [ ] **Stage 3 — Generator**
+- [x] **Stage 3 — Generator**
   - Scope: `stages/generator.ts` — iterate the plan in topological order, one LLM call per task, context assembled from direct dependencies plus type-selected boilerplate files.
   - Acceptance: a dry run writes every planned file to `generated-app/` in dependency order and records each in `state.generated`; no task receives context for a file it does not depend on.
-  - Commit: `feat: dependency-aware file generator`
+  - Commits: `fix: anchor dry-run fixture resolution on an unambiguous prompt marker`, `feat: generator prompts transcribed from the design`, `feat: dependency-aware file generator`, `feat: one task per output file in plan validation`, `docs: reconcile design with generator decisions`
 
 - [ ] **Stage 4 — Validator + repair loop**
   - Scope: `stages/validator.ts` — install deps once, run typecheck then tests in the output directory, parse and attribute errors, repair per file, bounded at 3 attempts.
