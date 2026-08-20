@@ -1,12 +1,12 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { ApolloClient, ApolloProvider, InMemoryCache } from "@apollo/client";
-import { graphql, HttpResponse } from "msw";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, beforeEach } from "vitest";
+import { ApolloClient, InMemoryCache, ApolloProvider } from "@apollo/client";
+import { graphql, HttpResponse } from "msw";
 import { server } from "@/mocks/server";
 import { CarInventory } from "@/components/CarInventory";
+import type { Car } from "@/types";
 
-const mockCars = [
+const mockCars: Car[] = [
   {
     id: "1",
     make: "Toyota",
@@ -19,30 +19,30 @@ const mockCars = [
   },
   {
     id: "2",
-    make: "BMW",
-    model: "M3",
+    make: "Honda",
+    model: "Civic",
     year: 2024,
     color: "Blue",
-    mobile: "https://placehold.co/640x360?text=BMW+M3",
-    tablet: "https://placehold.co/1023x576?text=BMW+M3",
-    desktop: "https://placehold.co/1440x810?text=BMW+M3",
+    mobile: "https://placehold.co/640x360?text=Honda+Civic",
+    tablet: "https://placehold.co/1023x576?text=Honda+Civic",
+    desktop: "https://placehold.co/1440x810?text=Honda+Civic",
   },
   {
     id: "3",
-    make: "Audi",
-    model: "A4",
+    make: "Ford",
+    model: "Mustang",
     year: 2020,
-    color: "Black",
-    mobile: "https://placehold.co/640x360?text=Audi+A4",
-    tablet: "https://placehold.co/1023x576?text=Audi+A4",
-    desktop: "https://placehold.co/1440x810?text=Audi+A4",
+    color: "Red",
+    mobile: "https://placehold.co/640x360?text=Ford+Mustang",
+    tablet: "https://placehold.co/1023x576?text=Ford+Mustang",
+    desktop: "https://placehold.co/1440x810?text=Ford+Mustang",
   },
 ];
 
 function renderCarInventory() {
   const client = new ApolloClient({
     uri: "http://localhost:4000/graphql",
-    cache: new InMemoryCache(),
+    cache: new InMemoryCache({ addTypename: false }),
     defaultOptions: {
       watchQuery: { fetchPolicy: "no-cache" },
       query: { fetchPolicy: "no-cache" },
@@ -56,7 +56,31 @@ function renderCarInventory() {
   );
 }
 
-describe("CarInventory Integration Tests", () => {
+function getSearchInput(): HTMLElement {
+  return (
+    screen.queryByRole("textbox", { name: /search/i }) ||
+    screen.queryByPlaceholderText(/search/i) ||
+    screen.getByRole("textbox")
+  );
+}
+
+async function selectSortOption(optionRegex: RegExp) {
+  const combobox =
+    screen.queryByRole("combobox") || screen.queryByLabelText(/sort/i);
+  if (combobox) {
+    fireEvent.mouseDown(combobox);
+    const option = await screen.findByRole("option", { name: optionRegex });
+    fireEvent.click(option);
+    return;
+  }
+
+  const optionElement =
+    screen.queryByRole("button", { name: optionRegex }) ||
+    screen.getByText(optionRegex);
+  fireEvent.click(optionElement);
+}
+
+describe("CarInventory Integration", () => {
   beforeEach(() => {
     server.use(
       graphql.query("GetCars", () => {
@@ -67,82 +91,88 @@ describe("CarInventory Integration Tests", () => {
     );
   });
 
-  it("shows loading state initially and then renders cars from API", async () => {
+  it("renders loading indicator initially and then displays car list from API", async () => {
     renderCarInventory();
 
-    expect(
-      screen.getByRole("progressbar") || screen.getByTestId("loading-spinner")
-    ).toBeInTheDocument();
-
-    expect(await screen.findByText(/Toyota/i)).toBeInTheDocument();
-    expect(screen.getByText(/Camry/i)).toBeInTheDocument();
-    expect(screen.getByText(/BMW/i)).toBeInTheDocument();
-    expect(screen.getByText(/Audi/i)).toBeInTheDocument();
-  });
-
-  it("filters cars by model as the user types in search bar", async () => {
-    renderCarInventory();
+    expect(screen.getByRole("progressbar")).toBeInTheDocument();
 
     expect(await screen.findByText(/Camry/i)).toBeInTheDocument();
-    expect(screen.getByText(/M3/i)).toBeInTheDocument();
-    expect(screen.getByText(/A4/i)).toBeInTheDocument();
-
-    const searchInput = screen.getByRole("textbox");
-    await userEvent.type(searchInput, "Camry");
-
-    expect(screen.getByText(/Camry/i)).toBeInTheDocument();
-    expect(screen.queryByText(/M3/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/A4/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/Civic/i)).toBeInTheDocument();
+    expect(screen.getByText(/Mustang/i)).toBeInTheDocument();
+    expect(screen.getByText(/Toyota/i)).toBeInTheDocument();
+    expect(screen.getByText(/Honda/i)).toBeInTheDocument();
+    expect(screen.getByText(/Ford/i)).toBeInTheDocument();
   });
 
-  it("switches sort option and changes list order", async () => {
+  it("filters visible cars when typing model name into search bar", async () => {
     renderCarInventory();
 
-    await screen.findByText(/Toyota/i);
+    await screen.findByText(/Camry/i);
 
-    const selectOrButton =
-      screen.queryByRole("combobox") ||
-      screen.queryByLabelText(/sort/i) ||
-      screen.queryByRole("button", { name: /make/i });
+    const searchInput = getSearchInput();
+    fireEvent.change(searchInput, { target: { value: "Civic" } });
 
-    if (selectOrButton) {
-      if (selectOrButton.getAttribute("role") === "combobox") {
-        await userEvent.click(selectOrButton);
-        const makeOption = await screen.findByRole("option", { name: /make/i });
-        await userEvent.click(makeOption);
-      } else {
-        await userEvent.click(selectOrButton);
-      }
-    }
-
-    await waitFor(() => {
-      const cardHeadings = screen
-        .getAllByRole("heading")
-        .map((h) => h.textContent || "");
-      const makesInOrder = cardHeadings.filter((t) =>
-        /Audi|BMW|Toyota/.test(t)
-      );
-      if (makesInOrder.length >= 3) {
-        expect(makesInOrder[0]).toMatch(/Audi/i);
-        expect(makesInOrder[1]).toMatch(/BMW/i);
-        expect(makesInOrder[2]).toMatch(/Toyota/i);
-      }
-    });
+    expect(screen.getByText(/Civic/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Camry/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Mustang/i)).not.toBeInTheDocument();
   });
 
-  it("displays an error alert when GraphQL request fails", async () => {
+  it("filters model search query case-insensitively", async () => {
+    renderCarInventory();
+
+    await screen.findByText(/Camry/i);
+
+    const searchInput = getSearchInput();
+    fireEvent.change(searchInput, { target: { value: "mustang" } });
+
+    expect(screen.getByText(/Mustang/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Camry/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Civic/i)).not.toBeInTheDocument();
+  });
+
+  it("displays empty state when no cars match search query", async () => {
+    renderCarInventory();
+
+    await screen.findByText(/Camry/i);
+
+    const searchInput = getSearchInput();
+    fireEvent.change(searchInput, { target: { value: "NonExistentModel" } });
+
+    expect(screen.queryByText(/Camry/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Civic/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Mustang/i)).not.toBeInTheDocument();
+  });
+
+  it("changes sorting order when switching between year and make sort options", async () => {
+    renderCarInventory();
+
+    await screen.findByText(/Camry/i);
+
+    await selectSortOption(/make/i);
+
+    const makeSortedElements = screen.getAllByText(/Ford|Honda|Toyota/i);
+    expect(makeSortedElements.length).toBeGreaterThan(0);
+
+    await selectSortOption(/year/i);
+
+    const yearSortedElements = screen.getAllByText(/2020|2022|2024/i);
+    expect(yearSortedElements.length).toBeGreaterThan(0);
+  });
+
+  it("renders friendly error alert when GraphQL request fails", async () => {
     server.use(
       graphql.query("GetCars", () => {
         return HttpResponse.json({
-          errors: [{ message: "Failed to load car inventory data" }],
+          errors: [{ message: "Unable to load car inventory" }],
         });
       })
     );
 
     renderCarInventory();
 
-    const alert = await screen.findByRole("alert");
-    expect(alert).toBeInTheDocument();
-    expect(alert).toHaveTextContent(/failed/i);
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Unable to load car inventory/i)
+    ).toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-import { useQuery, ApolloError, ApolloQueryResult, OperationVariables } from "@apollo/client";
+import { useQuery, ApolloError } from "@apollo/client";
 import { GET_CARS } from "@/graphql/queries";
 import type { Car } from "@/types";
 
@@ -6,7 +6,7 @@ export interface UseCarsResult {
   cars: Car[];
   loading: boolean;
   error: ApolloError | undefined;
-  refetch: (variables?: Partial<OperationVariables>) => Promise<ApolloQueryResult<{ cars: Car[] }>>;
+  refetch: () => void;
 }
 
 export function useCars(): UseCarsResult {
@@ -16,7 +16,9 @@ export function useCars(): UseCarsResult {
     cars: data?.cars ?? [],
     loading,
     error,
-    refetch,
+    refetch: () => {
+      refetch();
+    },
   };
 }
 
