@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { REPAIR_SYSTEM, repairUser } from '../prompts/repair';
 import { abort } from '../tools/errors';
 import { writeFile } from '../tools/fs';
@@ -28,8 +28,14 @@ function stripAnsi(text: string): string {
  *   src/components/WidgetList.tsx(5,9): error TS2322: Type 'number' is not assignable ...
  * Errors with no file prefix — bad tsconfig, no inputs found — keep their text and go to the
  * catch-all rather than being dropped.
+ *
+ * `source` is a parameter because `npm run build` starts with `tsc -b`, which emits exactly this
+ * shape: the same parser, tagged as the check that actually ran.
  */
-export function parseTypecheck(output: string): ValidationError[] {
+export function parseTypecheck(
+  output: string,
+  source: 'typecheck' | 'build' = 'typecheck',
+): ValidationError[] {
   const errors: ValidationError[] = [];
   for (const line of stripAnsi(output).split('\n')) {
     if (!/error TS\d+:/.test(line)) continue;
@@ -37,10 +43,93 @@ export function parseTypecheck(output: string): ValidationError[] {
     errors.push({
       file: match?.[1] ?? UNATTRIBUTED,
       raw: line.trim(),
-      source: 'typecheck',
+      source,
     });
   }
   return errors;
+}
+
+/**
+ * `npm run build` is `tsc -b && vite build`, so a build failure arrives in one of two shapes.
+ *
+ * The first is tsc's, unchanged from the typecheck pass, and it is parsed by the parser that
+ * already handles it — no new attribution logic, the errors name their own file.
+ *
+ * The second is Rollup's, reached only once types are clean, and it is what makes the build worth
+ * running at all: resolution and bundling failures that `tsc --noEmit` cannot see. It names the
+ * file in prose rather than in a column, and in more than one phrasing, so attribution is a short
+ * ordered list of patterns (see BUILD_FILE_PATTERNS) rather than one regex. Paths are made
+ * relative to `outDir`, because the plan, `state.generated` and the repair prompt all speak in
+ * paths relative to the app root.
+ *
+ * Anything else keeps its text and goes to the catch-all, which is reported but never repaired.
+ */
+export function parseBuild(output: string, outDir: string): ValidationError[] {
+  const tscErrors = parseTypecheck(output, 'build');
+  if (tscErrors.length > 0) return tscErrors;
+
+  const clean = stripAnsi(output);
+  const meaningful = clean
+    .split('\n')
+    .filter(
+      (line) =>
+        line.trim() !== '' &&
+        // npm's script echo and Vite's banner are not failures; reporting them as one is the
+        // mistake parseTests already had to be corrected for.
+        !/^\s*>\s/.test(line) &&
+        !/^\s*vite v\d/.test(line) &&
+        // Vite's stack frames point into its own bundle, never at generated code. They are the
+        // one part of the raw text that carries no signal for a repair call.
+        !/^\s*at .*node_modules/.test(line),
+    )
+    .join('\n')
+    .trim();
+
+  return [
+    {
+      file: attributeBuildError(clean, outDir),
+      raw:
+        meaningful.length > 0
+          ? meaningful
+          : 'The build command exited non-zero but produced no recognisable failure output.',
+      source: 'build',
+    },
+  ];
+}
+
+/**
+ * How Vite and Rollup name the offending file, in the order they are tried:
+ *   file: /abs/src/App.tsx:3:20                                    (transform/syntax errors)
+ *   Rollup failed to resolve import "x" from "/abs/src/App.tsx".   (resolution errors)
+ *   Could not load /abs/src/x (imported by src/App.tsx)            (load errors)
+ */
+const BUILD_FILE_PATTERNS = [
+  /^\s*file:\s*(.+?)\s*$/m,
+  /\bfrom\s+"([^"]+)"/,
+  /\(imported by ([^)]+)\)/,
+];
+
+function attributeBuildError(output: string, outDir: string): string {
+  for (const pattern of BUILD_FILE_PATTERNS) {
+    const match = pattern.exec(output);
+    const file = match?.[1] ? toAppRelative(match[1], outDir) : UNATTRIBUTED;
+    if (file !== UNATTRIBUTED) return file;
+  }
+  return UNATTRIBUTED;
+}
+
+/**
+ * A path Vite printed, expressed the way the plan and state.generated express it: relative to the
+ * app root, with any trailing line:column dropped. Anything that is not a file path, or points
+ * outside the generated app, is refused — a wrong attribution sends a repair call at a file that
+ * has nothing to do with the failure.
+ */
+function toAppRelative(file: string, outDir: string): string {
+  const trimmed = file.trim().replace(/:\d+(?::\d+)?$/, '');
+  if (!/\.[a-z]+$/i.test(trimmed)) return UNATTRIBUTED;
+  if (!isAbsolute(trimmed)) return trimmed;
+  const rel = relative(outDir, trimmed);
+  return rel === '' || rel.startsWith('..') ? UNATTRIBUTED : rel;
 }
 
 /**
@@ -131,10 +220,20 @@ async function ensureInstalled(outDir: string): Promise<void> {
   }
 }
 
+/** Same file, same text, from two checks — the repair prompt gains nothing from seeing it twice. */
+function isDuplicate(error: ValidationError, seen: ValidationError[]): boolean {
+  return seen.some((other) => other.file === error.file && other.raw === error.raw);
+}
+
 /**
- * One validation pass: typecheck, then tests. Both always run, even when typecheck fails —
- * Vite transpiles without type-checking, so tests surface a different class of defect, and with
- * only three attempts available every pass should return as much signal as it can.
+ * One validation pass: typecheck, then tests, then the production build. All three always run,
+ * even when an earlier one fails — Vite transpiles without type-checking, so tests surface a
+ * different class of defect, and the build surfaces a third (resolution and bundling) that
+ * neither of the others reaches. With only three attempts available every pass should return as
+ * much signal as it can.
+ *
+ * The build's own `tsc -b` step repeats the typecheck when types are broken, so build errors that
+ * duplicate one already reported are dropped rather than sent to the repair prompt twice.
  */
 async function validateOnce(outDir: string): Promise<ValidationError[]> {
   const errors: ValidationError[] = [];
@@ -153,6 +252,16 @@ async function validateOnce(outDir: string): Promise<ValidationError[]> {
   });
   if (tests.code !== 0) {
     errors.push(...parseTests(`${tests.stdout}\n${tests.stderr}`));
+  }
+
+  const build = await runCommand('npm', ['run', 'build'], {
+    cwd: outDir,
+    timeoutMs: CHECK_TIMEOUT_MS,
+  });
+  if (build.code !== 0) {
+    for (const error of parseBuild(`${build.stdout}\n${build.stderr}`, outDir)) {
+      if (!isDuplicate(error, errors)) errors.push(error);
+    }
   }
 
   return errors;

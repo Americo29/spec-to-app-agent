@@ -11,7 +11,7 @@ export interface Task {
 export interface ValidationError {
   file: string;          // best-effort file attribution
   raw: string;           // untouched error text (fed to repair as-is)
-  source: 'typecheck' | 'test';
+  source: 'typecheck' | 'test' | 'build';   // which check produced it
 }
 
 export interface Usage {
