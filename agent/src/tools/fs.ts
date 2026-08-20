@@ -1,5 +1,5 @@
 import { copyFile, mkdir, readdir, readFile, stat, writeFile as fsWriteFile } from 'node:fs/promises';
-import { dirname, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 /** Files larger than this are skipped by readFiles — they blow the context budget. */
 const MAX_FILE_BYTES = 20 * 1024;
@@ -97,18 +97,25 @@ export async function writeFile(path: string, content: string): Promise<void> {
   console.log(`[tool:writeFile] ${path}`);
 }
 
-async function copyTree(root: string, from: string, to: string): Promise<number> {
+async function copyTree(
+  root: string,
+  from: string,
+  to: string,
+  skip: string | null,
+): Promise<number> {
   let copied = 0;
   const entries = await readdir(from, { withFileTypes: true });
   for (const entry of entries) {
     const source = join(from, entry.name);
     const relativePath = relative(root, source);
-    if (isExcluded(relativePath)) continue;
+    if (isExcluded(relativePath) || relativePath === skip) continue;
     const destination = join(to, entry.name);
     if (entry.isDirectory()) {
-      await mkdir(destination, { recursive: true });
-      copied += await copyTree(root, source, destination);
+      copied += await copyTree(root, source, destination, skip);
     } else if (entry.isFile()) {
+      // Directories are created here rather than on the way down, so a directory that exists in
+      // the source only to hold the output directory is not recreated empty in the copy.
+      await mkdir(dirname(destination), { recursive: true });
       await copyFile(source, destination);
       copied += 1;
     }
@@ -116,10 +123,29 @@ async function copyTree(root: string, from: string, to: string): Promise<number>
   return copied;
 }
 
-/** Recursively copy `src` into `dest`, honouring SNAPSHOT_EXCLUDES. Returns files copied. */
+/**
+ * The path of `dest` relative to `src` when `dest` sits inside `src`, otherwise null.
+ * `--out generated-app` is exactly that case, and so is any other output directory the human
+ * points at inside the repository.
+ */
+export function nestedOutput(src: string, dest: string): string | null {
+  const rel = relative(src, dest);
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
+  return rel;
+}
+
+/**
+ * Recursively copy `src` into `dest`, honouring SNAPSHOT_EXCLUDES. Returns files copied.
+ *
+ * An output directory inside the source tree is excluded from the copy dynamically, so the agent
+ * never copies its own output into itself. Relying on the `generated-app` name in
+ * SNAPSHOT_EXCLUDES would only cover the default `--out`: any other nested path would be walked
+ * while it was being filled, duplicating a previous run's output at best and recursing at worst.
+ */
 export async function copyDir(src: string, dest: string): Promise<number> {
+  const skip = nestedOutput(src, dest);
   await mkdir(dest, { recursive: true });
-  const copied = await copyTree(src, src, dest);
+  const copied = await copyTree(src, src, dest, skip);
   console.log(`[tool:copyDir] ${src} → ${dest} (${copied} files)`);
   return copied;
 }
