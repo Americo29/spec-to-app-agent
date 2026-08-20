@@ -11,6 +11,17 @@ unedited.
 
 ## Quick start
 
+**Node 20 to 23** — the range is declared in `package.json` (`"engines": { "node": ">=20 <24" }`)
+and enforced by `.npmrc` (`engine-strict=true`), so an unsupported runtime fails `npm install`
+rather than surfacing later as confusing test failures. `.nvmrc` pins the verified version:
+
+```bash
+nvm use                     # reads .nvmrc → 22.13.1
+```
+
+Node 24 does not work, for a reason outside this project's control. See
+[Known limitations](#known-limitations).
+
 ```bash
 npm install                 # agent + boilerplate deps
 npm install --prefix agent
@@ -65,7 +76,7 @@ flowchart LR
     A[spec.txt] --> B[1. Snapshot<br/>deterministic]
     B --> C[2. Planner<br/>1 LLM call, JSON schema]
     C --> D[3. Generator<br/>per-file, dependency-aware]
-    D --> E{4. Validate<br/>typecheck + tests}
+    D --> E{4. Validate<br/>typecheck + tests + build}
     E -->|errors| F[Repair<br/>max 3 attempts]
     F --> E
     E -->|green| G[generated-app/]
@@ -91,10 +102,20 @@ model: direct dependencies only, plus the boilerplate files that task type needs
 project's own `Example.tsx` and `Example.test.tsx` as few-shot style references. No retries here; a
 file that fails to compile is the validator's problem.
 
-**4. Validator + repair** — installs once, then runs `npm run typecheck` and `npm run test -- --run`
-on every pass. Failures are parsed best-effort and grouped by file; anything unattributable goes to
-a catch-all that is always reported. Each broken file gets one repair call carrying its current
-content, the raw error text, and its direct dependencies. Bounded at three validation passes.
+**4. Validator + repair** — installs once, then runs `npm run typecheck`, `npm run test -- --run`
+and `npm run build` on every pass. Three checks because each sees something the others cannot: Vite
+transpiles without type-checking, tests catch behaviour, and the production build catches
+resolution and bundling failures that a green typecheck and a green suite both miss. Failures are
+parsed best-effort and grouped by file; anything unattributable goes to a catch-all that is always
+reported. Each broken file gets one repair call carrying its current content, the raw error text,
+and its direct dependencies. Bounded at three validation passes.
+
+Build failures feed the repair loop like any other error. `npm run build` is `tsc -b && vite build`:
+the `tsc` half emits exactly the shape the typecheck parser already reads, so it is reused and
+tagged `build`, and errors that merely repeat a typecheck finding are dropped rather than sent to
+the model twice. The Rollup half names its file in prose (`file: …`, `… from "…"`,
+`(imported by …)`), so attribution is an ordered list of those patterns with absolute paths mapped
+back to app-relative ones.
 
 ## Design decisions and tradeoffs
 
@@ -110,7 +131,7 @@ would add an embedding index, a similarity threshold and a class of silent recal
 a problem that does not exist at this scale. The mechanism that replaces it is the dependency
 graph: each generator call receives its direct dependencies — never the transitive closure — plus a
 fixed set of boilerplate files chosen by task type. That is exact rather than approximate, and it
-is why the nine non-planner calls average about 1,959 input tokens. At a scale where the project no
+is why the ten non-planner calls average about 1,998 input tokens. At a scale where the project no
 longer fits in context, retrieval becomes the right answer.
 
 **Tool calling where the output is data; plain text where the output is code.** The planner returns
@@ -139,7 +160,9 @@ Default: **`models/gemini-3.6-flash`**, via Gemini's OpenAI-compatible endpoint.
 The choice is measured, not preferred. Same agent, same prompts, same spec, only `LLM_MODEL`
 changed — though the two runs also produced different plans, 7 tasks on Flash-Lite against 5 on
 Flash, so the models were repairing different code. This is an observed difference across two real
-runs, not a controlled A/B; the cost figures below are what each run actually spent.
+runs, not a controlled A/B; the cost figures below are what each run actually spent. Both predate
+the final re-run, whose figures are in [Cost per run](#cost-per-run); they are reported as measured
+rather than restated from a later run they were not part of.
 
 | Model | Plan | Repair cost per call | Outcome |
 |---|---|---|---|
@@ -164,27 +187,76 @@ Measured from the run that produced the committed `generated-app/`:
 
 | Metric | Value |
 |---|---|
-| LLM calls | **10** — 1 planner, 5 generator, 4 repair |
-| Tokens in / out | **21,930 / 6,199** |
-| Planner call | 4,298 in / 417 out |
-| Repair calls | 586–1,862 input tokens each |
+| LLM calls | **11** — 1 planner, 6 generator, 4 repair |
+| Tokens in / out | **24,306 / 6,901** |
+| Planner call | 4,329 in / 452 out |
+| Repair calls | 736–2,197 input tokens each |
 | Validation attempts | 2 of 3 — red on attempt 1, green on attempt 2 |
-| Delivered test suite | 6 tests — 4 generated, plus the boilerplate's own 2 |
+| Delivered test suite | 8 tests — 6 generated, plus the boilerplate's own 2 |
 
 No dollar figure is given on purpose. The token counts are measured; a price is not, and published
 rates change faster than this file will. Convert at your provider's current rate.
 
 Three numbers that argue for design choices rather than merely describing the run:
 
-- **The single planner call is 20% of all input tokens** (4,298 of 21,930). One call carrying the
+- **The single planner call is 18% of all input tokens** (4,329 of 24,306). One call carrying the
   file tree and fourteen key files costs about as much as two or three generator calls. That is the
   argument for schema-enforcing it and validating the plan in code rather than retrying it blind — a
   wasted planner retry is the most expensive mistake the pipeline can make.
-- **The other nine calls average ~1,959 input tokens.** That is dependency-graph context selection
+- **The other ten calls average ~1,998 input tokens.** That is dependency-graph context selection
   working: each call sees its direct dependencies and its task type's boilerplate, not the project.
-- **4 of the 5 generated files failed first validation** and were repaired in a single round. The
+- **4 of the 6 generated files failed first validation** and were repaired in a single round. The
   repair loop is load-bearing on an ordinary run, not a rarely-fired safety net. Any honest account
   of this architecture has to say that the generator alone does not produce a working app.
+
+## Verification
+
+Everything below was run on **Node 22.13.1** (the version in `.nvmrc`, npm 10.9.2), from a fresh
+checkout with no `node_modules` anywhere — first the repository, then the delivered app.
+
+```bash
+nvm use                                  # 22.13.1
+
+# repository root
+npm install                              # 281 packages, exit 0
+npm install --prefix agent               # 45 packages, exit 0
+npm run typecheck                        # exit 0
+npm test                                 # 1 file, 2 tests passed, exit 0
+npm run build                            # built in 1.40s, exit 0
+
+# the delivered app
+cd generated-app
+npm install                              # 281 packages, exit 0
+npm run typecheck                        # exit 0
+npm test                                 # 2 files, 8 tests passed, exit 0
+npm run build                            # built in 1.58s, 624.64 kB bundle, exit 0
+```
+
+| What | Result |
+|---|---|
+| Node | 22.13.1 (`.nvmrc`), npm 10.9.2 — the delivered suite and build were also re-run on 20.20.2, the floor of the range: 8/8 and green |
+| Repository suite | 1 file, **2 tests passed** |
+| Delivered app suite | 2 files, **8 tests passed** — 6 generated, plus the boilerplate's own 2 |
+| Production build (both) | **passed** |
+| Agent run | exit 0, **validation attempt 2 of 3 green** — red on attempt 1 with 4 errors across 4 files, one repair round, then typecheck, tests and build all green |
+
+The committed `generated-app/` is the output of that run — the agent was re-run from clean after
+the build was added to the validation loop, so the committed output is the product of the committed
+pipeline rather than of an earlier one.
+
+Two enforcement checks, since declaring a range is not the same as enforcing it:
+
+- `npm install` on **Node 24.19.0** fails with `npm error code EBADENGINE … Required:
+  {"node":">=20 <24"} Actual: {"node":"v24.19.0"}` — from the delivered app's own directory, which
+  is where a reviewer would hit it.
+- `--out` guarding, both directions: a nested output directory (`--out tmp-nested/app`) runs the
+  full pipeline to green, and `--out .` and `--out ..` are refused before anything is copied, with
+  a message and exit code 1 rather than a stack trace.
+
+The build check was verified against both failure shapes it has to handle, using real captured
+output rather than a synthetic string: a `tsc -b` type error attributed to `src/App.tsx`, and a
+Rollup resolution failure — typecheck green, build red — attributed to `src/App.tsx` from Vite's
+prose, with Vite's own stack frames stripped from the text passed to repair.
 
 ## What worked well
 
@@ -192,13 +264,15 @@ Measured, from the committed Flash run unless noted:
 
 - **Plan validation passed on attempt 1 in both model runs**, including the one that later failed
   to converge. Schema enforcement plus in-code checks did their job; the retry was never needed.
-- **Dependency-graph context selection held the nine non-planner calls to ~1,959 input tokens on
+- **Dependency-graph context selection held the ten non-planner calls to ~1,998 input tokens on
   average**, against a boilerplate that would not have been cheap to send whole.
-- **Test-failure retargeting behaved as designed** — the run log shows repair aimed at the component
-  under test rather than at the failing test, which is the behaviour that keeps a green run
-  meaningful.
 - **The pipeline converged in a single repair round**, red on validation attempt 1 and green on
-  attempt 2, with four of five generated files repaired in that one round.
+  attempt 2, with four of six generated files repaired in that one round — and the third check,
+  the production build, green on the same pass as the other two.
+- **Test-failure retargeting did not fire in this run**, which is worth stating rather than
+  implying otherwise: all four attempt-1 failures were type errors, each attributed to its own
+  file. The retargeting path is structural — a test task's `dependsOn` names what it exercises —
+  but this run did not exercise it.
 
 ## What the real runs taught
 
@@ -256,13 +330,13 @@ visible in the committed output rather than hidden:
 - **Search semantics.** "Filters the list by model as the user types" was implemented as a
   case-insensitive substring match on `model`, trimmed.
 - **Sort direction.** "Sort by year or by make" does not state a direction. The generated code sorts
-  make ascending by locale comparison and year ascending numerically.
+  make ascending by locale comparison and year descending — newest first.
 - **Scope discipline.** The brief lists optional extras — an `AddCar` mutation, a `GetCar` query, a
   year filter, a `useCarFilters()` hook. None appear in the spec, and the planner is instructed to
-  keep plans minimal, so none were built. The five generated files are the smallest set that
+  keep plans minimal, so none were built. The six generated files are the smallest set that
   satisfies the spec.
 
-**Three modifications were made to the boilerplate.** The brief explicitly permits updating
+**Six modifications were made to the boilerplate.** The brief explicitly permits updating
 boilerplate configs to improve agent output quality; each is recorded in `CLAUDE.md` and justified
 there:
 
@@ -272,12 +346,37 @@ there:
    an agent that rewrites the tree it copies is a harder thing to trust.
 3. `vitest.config.ts` — `generated-app/**` excluded from the root test run, so `npm test` at the
    repository root does not collect the generated app's tests and show misleading red.
+4. `package.json` — `"engines": { "node": ">=20 <24" }`, the range this project is verified on.
+5. `.npmrc` — `engine-strict=true`, so that range fails an install rather than printing a warning.
+6. `.nvmrc` — `22.13.1`, so `nvm use` picks the verified version without anyone reading a README
+   first.
 
-Two of the three exist only because the brief's structure places the generated app inside the
-repository that produced it.
+Items 4 to 6 are copied into the generated app by the snapshot, because that app is installed and
+run on its own and the constraint has to be enforced where it is run. Items 2 and 3 exist only
+because the brief's structure places the generated app inside the repository that produced it.
 
 ## Known limitations
 
+- **Node 24 is not supported, and the range is enforced rather than documented.** Verified by
+  reproduction on the delivered app's own suite: 8/8 pass on Node 20.20.2 and on 22.13.1; on
+  24.19.0 the two boilerplate tests pass and all six generated tests fail with
+  `RequestInit: Expected signal ("AbortSignal {}") to be an instance of AbortSignal`. That is a
+  realm mismatch between jsdom's `AbortSignal` and Node 24's native fetch (undici), not a defect in
+  this project or in the generated code. Ruled out: MSW — it fails identically on 2.12.14 and
+  2.15.0. Attempted and rejected: pinning `globalThis.AbortController` / `AbortSignal` in the test
+  setup, both inline and from a separate setup file loaded first; the polyfill loads and the
+  failure persists, because undici validates against its own class reference rather than the
+  global. The remaining honest options were to chase a fix inside a dependency this project does
+  not control, or to declare the range that works — `>=20 <24`, in `engines`, enforced by
+  `engine-strict=true` so an unsupported runtime fails `npm install` instead of failing six tests
+  later for reasons that look unrelated. `.nvmrc` names the verified version. This is a runtime
+  constraint that was measured, not a defect that was ignored; the range widens the day the
+  jsdom/undici interaction is fixed upstream.
+- **The generated suite tests behaviour, but not uniformly well.** Five of the six generated tests
+  assert on rendered data — filtered results after typing, the empty state, the error alert. The
+  sort test asserts that elements are present after switching the control, not that their order
+  changed. The validator cannot see the difference: both are green. This is the concrete case for
+  the mutation testing listed under Production hardening.
 - **Per-file repair sees one file's errors at a time.** A defect spanning two files — an exported
   signature and its consumer — gives each repair call half the picture. Widening the context to
   co-dependents brings its own cost and oscillation risk, so it was left alone and watched.
@@ -319,6 +418,7 @@ Deliberately out of scope here, and what would come next:
 | `specs/car-inventory.txt` | the sample specification the agent consumes |
 | `generated-app/` | output of one real run, committed unedited — no README of its own, deliberately: see below |
 | `src/`, `public/`, configs | the boilerplate, otherwise unmodified |
+| `.nvmrc`, `.npmrc` | the supported Node version and its enforcement; both are copied into the generated app |
 | `TODO.md` | the original task breakdown, written before any code |
 | `CLAUDE.md` | the design document |
 | `BOILERPLATE.md` | the boilerplate's original README |

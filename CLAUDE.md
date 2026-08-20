@@ -16,7 +16,7 @@ flowchart LR
     A[spec.txt] --> B[1. Snapshot<br/>deterministic]
     B --> C[2. Planner<br/>1 LLM call, JSON schema]
     C --> D[3. Generator<br/>per-file, dependency-aware]
-    D --> E{4. Validate<br/>typecheck + tests}
+    D --> E{4. Validate<br/>typecheck + tests + build}
     E -->|errors| F[Repair<br/>max 3 attempts]
     F --> E
     E -->|green| G[generated-app/]
@@ -25,7 +25,7 @@ flowchart LR
 ## Hard rules for Claude Code
 
 1. **Only run `git commit` or `git push` when the human explicitly asks for it in the same instruction**, using exactly the commit message from the build-order table. "Then push" is that authorization; never push unprompted, and never treat a previous stage's authorization as carrying forward. Before committing, show a summary of changed files.
-2. **Never modify the boilerplate at the repo root** (`src/`, `public/`, `index.html`, configs). The agent copies it at runtime; the source stays pristine. Exactly **three** modifications are authorized, all recorded below: the `agent` script in `package.json`, and in `vitest.config.ts` both the absolute `setupFiles` path and the `generated-app/**` exclusion. The brief explicitly permits updating boilerplate configs to improve agent output quality; anything beyond these three needs the human's approval.
+2. **Never modify the boilerplate at the repo root** (`src/`, `public/`, `index.html`, configs). The agent copies it at runtime; the source stays pristine. Exactly **six** modifications are authorized, all recorded below under "Authorized boilerplate modifications": the `agent` script and the `engines` field in `package.json`, `.nvmrc` and `.npmrc` at the root, and in `vitest.config.ts` both the absolute `setupFiles` path and the `generated-app/**` exclusion. The brief explicitly permits updating boilerplate configs to improve agent output quality; anything beyond these six needs the human's approval.
 3. **Work one stage at a time.** Only implement the stage the human asks for in the current instruction. Do not "get ahead".
 4. **No new runtime dependencies** beyond: `openai` (SDK, used as a generic OpenAI-compatible client), `commander` (or plain `process.argv` — prefer plain argv if commander feels heavy), `dotenv`. Dev deps: `typescript`, `tsx`, `@types/node`.
 5. **No classes unless state demands it.** Prefer plain functions + typed data. Each stage is a function `(state: PipelineState, llm: LlmClient) => Promise<PipelineState>` — the client is passed alongside the state rather than stored on it, so `PipelineState` stays plain serialisable data. Snapshot ignores its `llm` argument; the signature is uniform so `pipeline.ts` can call every stage the same way.
@@ -72,6 +72,8 @@ repo/                       # the repository root IS the boilerplate — NEVER m
 │   └── car-inventory.txt
 ├── generated-app/          # output of a real run (deliverable)
 ├── .env.example            # the ONE env template — agent LLM vars, at the root
+├── .nvmrc                  # supported Node version, copied into the generated app
+├── .npmrc                  # engine-strict=true, copied into the generated app
 ├── TODO.md
 ├── BOILERPLATE.md          # the boilerplate's original README
 ├── CLAUDE.md               # this file
@@ -103,7 +105,7 @@ export interface Task {
 export interface ValidationError {
   file: string;          // best-effort file attribution
   raw: string;           // untouched error text (fed to repair as-is)
-  source: 'typecheck' | 'test';
+  source: 'typecheck' | 'test' | 'build';
 }
 
 export interface Usage {
@@ -187,6 +189,23 @@ LLM_MODEL=gemini-2.5-flash
   `node_modules` must stay out of git; the copied `.gitignore` keeps that protection local to the
   generated app instead of relying only on the root `.gitignore`. Do not drop it when revisiting
   this list.
+- `.nvmrc` and `.npmrc` are copied for the same reason and pass the same test: the generated app is
+  installed and run on its own, so the supported Node version and the strict-engine setting have to
+  travel with it. A reviewer who runs the generated app on Node 24 must be stopped by its own
+  `npm install`, not by the repository it came from.
+- **The resolved output directory is excluded from the copy dynamically**, so the agent never copies
+  its own output into itself. The `generated-app` name in the exclusion list covers only the default
+  `--out`; any other nested path would otherwise be walked while it was being filled, duplicating a
+  previous run's output at best and recursing at worst. `nestedOutput(src, dest)` in `tools/fs.ts`
+  returns the destination's path relative to the source when it is inside it, and `copyTree` skips
+  exactly that path. A nested `--out` is therefore supported, not merely tolerated.
+- Destination directories are created when a file is written into them, not on the way down, so a
+  directory that exists in the source only to hold the output is not recreated empty in the copy.
+- **Two output paths are refused up front** by `assertSafeOutDir`, before anything is copied: an
+  `outDir` that resolves to the repository root, where the copy would write the boilerplate over its
+  own source, and one that resolves to an ancestor of it, where the destination contains the source
+  being read. Neither can be rescued by an exclusion. Both abort through `abort()` with a message
+  naming the resolved path (hard rule 7) — never a stack trace, never a half-overwritten tree.
 - Build `tree` (relative paths, one per line) from the copy, so `tree` and `files` always
   describe the same directory.
 - Read into `files`: package.json, tsconfig, vite/vitest configs, MSW handlers + mock data,
@@ -249,7 +268,7 @@ LLM_MODEL=gemini-2.5-flash
 
 ### Authorized boilerplate modifications
 
-Three, and only three:
+Six, and only six:
 
 1. `package.json` — the `agent` script (see CLI, below).
 2. `vitest.config.ts` — `setupFiles` is an **absolute** path built with
@@ -269,19 +288,54 @@ Three, and only three:
    rather than replaced, since an `exclude` array otherwise overrides `node_modules` and `dist`.
    Like the item above, this exists only because the brief's structure puts the generated app
    inside the repository that produced it.
+4. `package.json` — `"engines": { "node": ">=20 <24" }`. Node 24's native fetch (undici) validates
+   an `AbortSignal` against its own class reference, and jsdom supplies a different realm's, so
+   four of the delivered app's six tests fail there with
+   `RequestInit: Expected signal ("AbortSignal {}") to be an instance of AbortSignal`. The failure
+   is in the interaction between the runtime and jsdom, not in anything this project controls: it
+   reproduces identically on MSW 2.12.14 and 2.15.0, and pinning `globalThis.AbortController` /
+   `AbortSignal` in test setup does not fix it, because undici compares against its own class rather
+   than the global. Declaring the range that works is honest; chasing a fix inside a dependency is
+   not.
+5. `.npmrc` — `engine-strict=true`. `engines` alone is a warning npm prints and the reviewer
+   scrolls past; the review asked for enforcement. With this, `npm install` on an unsupported
+   runtime fails with `EBADENGINE` instead of producing an install whose test run breaks later for
+   reasons that look unrelated.
+6. `.nvmrc` — `22.13.1`, the version this project is verified on. `nvm use` then picks it without
+   anyone having to read a README first.
+
+Items 4–6 travel into the generated app through the snapshot, which is the point: the generated app
+is installed and run on its own, so the constraint has to be enforced where it is run.
 
 ### 4. Validator + Repair (`stages/validator.ts`) — bounded loop
 - **`outDir` is not guaranteed complete.** The generator writes each file as it is produced, so a
   mid-run failure leaves a partially generated app. This is accepted: the design promises neither
   idempotent nor atomic runs, and a real run starts from a clean `outDir`. The validator must
   therefore work from what is on disk rather than assume every planned file exists.
-- Run `npm run typecheck`, then `npm run test -- --run` inside `outDir` (install deps once first;
-  the install is skipped when `node_modules` already exists).
-- **Both checks run on every pass, even when typecheck fails.** Vite transpiles without
-  type-checking, so tests surface a different class of defect; with only three attempts available,
+- Run `npm run typecheck`, then `npm run test -- --run`, then `npm run build` inside `outDir`
+  (install deps once first; the install is skipped when `node_modules` already exists).
+- **All three checks run on every pass, even when an earlier one fails.** Vite transpiles without
+  type-checking, so tests surface a different class of defect, and the build surfaces a third —
+  resolution and bundling — that neither of the others reaches. With only three attempts available,
   each pass should return as much signal as it can.
-- Parse errors best-effort: tsc lines → file via regex; vitest failures → test file name.
-  Group by file. Unattributable errors go to a catch-all bucket reported to the human.
+- **The build is in the loop, not after it.** `npm run build` is `tsc -b && vite build`, so a build
+  failure arrives in one of two shapes and both feed repair exactly as typecheck errors do:
+  - `tsc -b` emits the same `file(line,col): error TSxxxx` lines as `tsc --noEmit`, so
+    `parseTypecheck` parses them unchanged, tagged `source: 'build'`. No new attribution logic.
+  - Rollup emits prose, reached only once types are clean, and names the file in more than one
+    phrasing (`file: <path>`, `... from "<path>"`, `(imported by <path>)`). Attribution is an
+    ordered list of those patterns; absolute paths are made relative to `outDir`, because the plan,
+    `state.generated` and the repair prompt all speak in paths relative to the app root. Anything
+    that is not a file path, or points outside the app, is refused rather than guessed at — a wrong
+    attribution aims a repair call at a file with nothing to do with the failure.
+  Vite's own stack frames (`at …/node_modules/…`) are dropped from `raw`: they name Vite internals
+  and are the one part of the text that carries no signal for a repair call.
+- **Build errors that repeat a typecheck error are dropped**, since `tsc -b` re-reports whatever
+  `tsc --noEmit` just found. Same file, same text, from two checks — the repair prompt gains nothing
+  from seeing it twice.
+- Parse errors best-effort: tsc lines → file via regex; vitest failures → test file name; build
+  failures as above. Group by file. Unattributable errors go to a catch-all bucket reported to the
+  human.
 - **Failure is derived from exit codes and genuine runner markers, never from unrecognised
   output.** npm's script echo (`> pkg@1.0.0 test`) and Vitest's banner are stripped before
   anything is reported: treating them as the failure once turned a real collection error into a
@@ -453,10 +507,15 @@ npm run agent -- --spec specs/car-inventory.txt [--out generated-app] [--dry-run
 ```
 
 The `agent` script lives in the **root** `package.json` (`agent/node_modules/.bin/tsx
-agent/src/index.ts`) — one of the two authorized modifications to the boilerplate, required by the
-brief's "run your agent with a single script". Running from the root keeps `--spec` paths relative
-to the repository rather than to `agent/`. Argument parsing is plain `process.argv`: four flags do
-not justify a dependency.
+agent/src/index.ts`) — the first of the authorized modifications to the boilerplate, required by
+the brief's "run your agent with a single script". Running from the root keeps `--spec` paths
+relative to the repository rather than to `agent/`. Argument parsing is plain `process.argv`: four
+flags do not justify a dependency.
+
+`--out` accepts any directory inside the repository or outside it; the snapshot excludes the
+resolved destination from its own copy, so nesting is safe. It refuses exactly two shapes — the
+repository root itself and any ancestor of it — with a message rather than a stack trace. See the
+snapshot contract.
 
 Startup order: parse args → load .env → validate env (skip if dry-run) → run pipeline →
 print summary table: stages executed, LLM calls, tokens in/out, validation attempts,
@@ -473,6 +532,13 @@ final status, output path.
 | 4 | validator + repair loop + error parser | 5: feat: validate/repair loop with bounded retries |
 | 5 | E2E run, prompt tweaks (human-driven) | 6: feat: sample spec + generated output from full run |
 | 6 | README (human-driven) | 7: docs: architecture, tradeoffs, cost analysis |
+| 7 | Review response: supported Node range, `--out` guard, build in the validation loop, re-run, verification report | commit messages set by the human at review time |
+
+Stage 7 is the response to the reviewer's feedback on the submitted challenge, not part of the
+original build order. Its scope is fixed by that feedback: declare and enforce the supported Node
+version, guard `--out` against copying the output into itself, add `npm run build` to the validation
+loop, re-run the agent from clean so the committed output is the product of the committed pipeline,
+verify from a fresh clone, and report both in the README.
 
 A stage may land as **several focused commits** when it has separable concerns; the table names the
 stage's headline scope, not a one-commit-per-stage rule. When hard rule 9 triggers, the design
