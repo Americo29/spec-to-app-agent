@@ -3,6 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20 <24"
+  },
   "scripts": {
     "agent": "agent/node_modules/.bin/tsx agent/src/index.ts",
     "dev": "vite",
